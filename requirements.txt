@@ -1,0 +1,11 @@
+ocrmypdf
+pytesseract
+pdf2image
+Pillow
+PyPDF2
+mysql-connector-python
+beautifulsoup4
+requests
+selenium
+tqdm
+pandas
