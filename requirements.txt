@@ -9,3 +9,6 @@ requests
 selenium
 tqdm
 pandas
+pymysql
+Flask
+Flask-Cors

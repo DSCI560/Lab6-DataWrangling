@@ -1,4 +1,4 @@
--- Active: 1771589099514@@127.0.0.1@3306@oil_wells
+-- Active: 1771910848211@@127.0.0.1@3306@oil_wells
 CREATE TABLE wells (
   id INT AUTO_INCREMENT PRIMARY KEY,
   filename VARCHAR(255),          -- source PDF filename

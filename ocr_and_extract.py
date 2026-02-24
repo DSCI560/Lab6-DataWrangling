@@ -72,7 +72,7 @@ def ocr_pdf_to_text(filepath):
     except Exception:
         total_pages = None
 
-    batch_size = 12
+    batch_size =50
     current_page = 1
 
     while total_pages and current_page <= total_pages:

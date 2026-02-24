@@ -1,4 +1,4 @@
--- Active: 1771589099514@@127.0.0.1@3306@oil_wells
+-- Active: 1771910848211@@127.0.0.1@3306@oil_wells
 ALTER TABLE wells
 ADD COLUMN qc_status VARCHAR(32) DEFAULT 'pending';
 
