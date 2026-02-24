@@ -1,91 +1,187 @@
-# scrape_drillingedge.py
+import pymysql
 import requests
 from bs4 import BeautifulSoup
-import mysql.connector
-import time
-import os
+from urllib.parse import urljoin
 
-DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
-DB_USER = os.environ.get("DB_USER", "root")
-DB_PASS = os.environ.get("DB_PASS", "admin123")
-DB_NAME = os.environ.get("DB_NAME", "oil_wells")
+# ===============================
+# CONFIG
+# ===============================
 
-BASE_SEARCH = "https://www.drillingedge.com/search?q={query}"
+BASE_URL = "https://www.drillingedge.com"
+SEARCH_URL = "https://www.drillingedge.com/search?q="
 
-def db_connect():
-    return mysql.connector.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME)
+DB_CONFIG = {
+    "host": "localhost",
+    "user": "root",
+    "password": "admin123",
+    "database": "oil_wells",
+}
 
-def search_and_scrape(api, well_name):
-    query = api or well_name
-    if not query:
+HEADERS = {
+    "User-Agent": "Mozilla/5.0"
+}
+
+# ===============================
+# DB CONNECTION
+# ===============================
+
+conn = pymysql.connect(**DB_CONFIG)
+cursor = conn.cursor()
+
+# ===============================
+# GET WELLS TO ENRICH
+# ===============================
+
+def get_wells_to_scrape():
+    """
+    Only scrape:
+    - QC valid wells
+    - Wells with API
+    - Wells not already enriched
+    """
+    cursor.execute("""
+        SELECT w.id, w.api
+        FROM wells w
+        LEFT JOIN drillingedge_extra d
+            ON w.id = d.well_id
+        WHERE w.qc_status = 'valid'
+        AND w.api IS NOT NULL
+        AND d.id IS NULL
+    """)
+    return cursor.fetchall()
+
+# ===============================
+# SCRAPE WELL PAGE
+# ===============================
+
+def scrape_well_data(api):
+    search_url = SEARCH_URL + api
+    print(f"Searching: {search_url}")
+
+    try:
+        r = requests.get(search_url, headers=HEADERS, timeout=15)
+    except Exception as e:
+        print(f"Search request failed: {e}")
         return None
-    url = BASE_SEARCH.format(query=requests.utils.quote(query))
-    r = requests.get(url, timeout=15)
+
     if r.status_code != 200:
+        print("Search request returned non-200 status")
         return None
+
     soup = BeautifulSoup(r.text, "html.parser")
-    # heuristics: find first result link
-    link = soup.select_one("a.result-link") or soup.select_one("a")
-    if not link:
+
+    # Find first well link
+    well_link = None
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if "/well/" in href:
+            well_link = urljoin(BASE_URL, href)
+            break
+
+    if not well_link:
+        print("No well link found in search results")
         return None
-    href = link.get("href")
-    if href.startswith("/"):
-        href = "https://www.drillingedge.com" + href
-    # fetch well page
-    wp = requests.get(href, timeout=15)
-    if wp.status_code != 200:
+
+    if well_link.rstrip("/") == BASE_URL:
+        print("Homepage link detected — skipping")
         return None
-    wsoup = BeautifulSoup(wp.text, "html.parser")
-    # Now extract fields: look for labels or highlighted spans
-    def get_text_by_label(lbl):
-        el = wsoup.find(text=lambda t: t and lbl in t)
-        if el:
-            parent = el.parent
-            nxt = parent.find_next_sibling(text=True)
-            if nxt:
-                return nxt.strip()
+
+    print(f"Found well page: {well_link}")
+
+    try:
+        r2 = requests.get(well_link, headers=HEADERS, timeout=15)
+    except Exception as e:
+        print(f"Well page request failed: {e}")
         return None
-    # fallback: look for numeric badges
-    barrels = None
-    b_el = wsoup.find(lambda tag: tag.name=="span" and "Barrels" in tag.text)
-    if b_el:
-        barrels = b_el.text.strip()
-    # try well status / type / closest city using label text on page
-    status = None
-    wtype = None
-    city = None
-    # generic approach: scan small tables
-    for tr in wsoup.select("table tr"):
-        tds = [td.get_text(separator=" ", strip=True) for td in tr.find_all(["td","th"])]
-        if len(tds) >= 2:
-            key = tds[0].lower()
-            val = tds[1]
-            if "status" in key and not status:
-                status = val
-            if "type" in key and not wtype:
-                wtype = val
-            if "closest city" in key or "closest" in key:
-                city = val
-    return {"url": href, "status": status, "type": wtype, "city": city, "barrels": barrels}
+
+    if r2.status_code != 200:
+        print("Failed to load well page")
+        return None
+
+    soup2 = BeautifulSoup(r2.text, "html.parser")
+    text = soup2.get_text(separator="\n")
+
+    def extract_field(label):
+        for line in text.split("\n"):
+            if label.lower() in line.lower():
+                parts = line.split(":")
+                if len(parts) > 1:
+                    return parts[-1].strip()
+        return None
+
+    well_status = extract_field("Well Status")
+    well_type = extract_field("Well Type")
+    closest_city = extract_field("Closest City")
+    barrels = extract_field("Barrels of Oil")
+    gas = extract_field("MCF Gas")
+
+    # Basic sanity check
+    if not any([well_status, well_type, closest_city, barrels, gas]):
+        print("No meaningful data extracted")
+        return None
+
+    return {
+        "well_status": well_status,
+        "well_type": well_type,
+        "closest_city": closest_city,
+        "barrels_of_oil": barrels,
+        "mcf_gas": gas,
+        "scraped_url": well_link
+    }
+
+# ===============================
+# SAVE ENRICHMENT (UPSERT)
+# ===============================
+
+def save_enrichment(well_id, data):
+    cursor.execute("""
+        INSERT INTO drillingedge_extra (
+            well_id,
+            well_status,
+            well_type,
+            closest_city,
+            barrels_of_oil,
+            mcf_gas,
+            scraped_url
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        ON DUPLICATE KEY UPDATE
+            well_status = VALUES(well_status),
+            well_type = VALUES(well_type),
+            closest_city = VALUES(closest_city),
+            barrels_of_oil = VALUES(barrels_of_oil),
+            mcf_gas = VALUES(mcf_gas),
+            scraped_url = VALUES(scraped_url)
+    """, (
+        well_id,
+        data["well_status"],
+        data["well_type"],
+        data["closest_city"],
+        data["barrels_of_oil"],
+        data["mcf_gas"],
+        data["scraped_url"]
+    ))
+
+    conn.commit()
+
+# ===============================
+# MAIN
+# ===============================
 
 def main():
-    conn = db_connect()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT id, api, well_name FROM wells")
-    rows = cur.fetchall()
-    for r in rows:
-        res = search_and_scrape(r['api'], r['well_name'])
-        if res:
-            cur2 = conn.cursor()
-            cur2.execute("""
-                INSERT INTO drillingedge_extra (well_id, well_status, well_type, closest_city, barrels_of_oil, scraped_url)
-                VALUES (%s,%s,%s,%s,%s,%s)
-            """, (r['id'], res.get('status'), res.get('type'), res.get('city'), res.get('barrels'), res.get('url')))
-            conn.commit()
-            cur2.close()
-        time.sleep(1)  # avoid hammering the site
-    cur.close()
-    conn.close()
+    wells = get_wells_to_scrape()
+
+    print(f"Found {len(wells)} wells to enrich")
+
+    for well_id, api in wells:
+        print(f"\nEnriching Well ID {well_id} (API {api})")
+
+        data = scrape_well_data(api)
+
+        if data:
+            save_enrichment(well_id, data)
+            print("→ Enrichment saved")
+        else:
+            print("→ No data saved")
 
 if __name__ == "__main__":
     main()
