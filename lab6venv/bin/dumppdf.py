@@ -1,4 +1,4 @@
-#!/mnt/c/Users/limba/OneDrive/Documents/DSCI 560/Lab 6/lab6venv/bin/python3
+#!/home/harsh/Lab6/Lab6-DataWrangling/lab6venv/bin/python3
 """Extract pdf structure in XML format"""
 
 import logging

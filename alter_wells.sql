@@ -1,0 +1,9 @@
+-- Active: 1771589099514@@127.0.0.1@3306@oil_wells
+ALTER TABLE wells
+ADD COLUMN qc_status VARCHAR(32) DEFAULT 'pending';
+
+ALTER TABLE wells
+ADD UNIQUE (api);
+
+ALTER TABLE wells
+ADD COLUMN raw_text LONGTEXT;

@@ -1,4 +1,3 @@
-# ocr_and_extract.py
 import os
 import hashlib
 import pymysql
@@ -19,23 +18,16 @@ from parse_utils import (
     is_valid_nd_coordinate
 )
 
-# CONFIG
-PDF_FOLDER = "pdfs"
-
-DB_CONFIG = {
+pdf_folder = "pdfs"
+db_config = {
     "host": "localhost",
     "user": "root",
     "password": "admin123",
     "database": "oil_wells",
 }
 
-# DB connection
-conn = pymysql.connect(**DB_CONFIG)
+conn = pymysql.connect(**db_config)
 cursor = conn.cursor()
-
-# ============================================================
-# FILE HASH
-# ============================================================
 
 def get_file_hash(filepath):
     hasher = hashlib.sha256()
@@ -48,34 +40,23 @@ def already_processed(file_hash):
     cursor.execute("SELECT id FROM wells WHERE file_hash = %s", (file_hash,))
     return cursor.fetchone() is not None
 
-
-# ============================================================
-# OCR ALL PAGES (NO EARLY STOP)
-# ============================================================
-
 def ocr_pdf_to_text(filepath):
-
     text = ""
 
-    # STEP 1: Try direct extraction
     try:
         reader = PdfReader(filepath)
         for page in reader.pages:
             extracted = page.extract_text()
             if extracted:
                 text += extracted + "\n"
-
-        # Use direct text only if it looks complete and contains API
         if len(text.strip()) > 400 and extract_api(text):
-            print("→ Using direct PDF text extraction")
+            print("Using direct PDF text extraction")
             return clean_text(text)
-
-        print("→ Direct extraction incomplete — performing full OCR")
-
+        if text.strip():
+            print("Text extracted but API not found, running OCR fallback")
     except Exception:
         pass
 
-    # STEP 2: Full OCR (ALL pages)
     try:
         reader = PdfReader(filepath)
         total_pages = len(reader.pages)
@@ -104,13 +85,27 @@ def ocr_pdf_to_text(filepath):
             del images
             gc.collect()
 
+            stim_rows, ext = parse_all_stim_and_extended(text)
+            api_found = extract_api(text)
+            coords = extract_coordinates(text)
+            coords_ok = coords[0] is not None and coords[1] is not None
+
+            stim_present = False
+            if stim_rows:
+                stim_present = True
+            if ext.get('treatment_type') or ext.get('lbs_proppant') or ext.get('treatment_pressure'):
+                stim_present = True
+
+            if api_found and coords_ok and stim_present:
+                print("Required metadata and stimulation found, stopping OCR early")
+                break
+
             current_page = last_page + 1
 
         except MemoryError:
-            print("⚠ MemoryError — reducing batch size")
+            print("MemoryError, reducing batch size")
             batch_size = max(4, batch_size // 2)
             gc.collect()
-
         except Exception as e:
             print(f"OCR batch error: {e}")
             batch_size = max(4, batch_size // 2)
@@ -118,34 +113,18 @@ def ocr_pdf_to_text(filepath):
 
     return clean_text(text)
 
-
-# ============================================================
-# VALIDATION
-# ============================================================
-
 def validate_well_record(data):
-
     if not data.get("api"):
         return "invalid"
-
     if data.get("latitude") is None or data.get("longitude") is None:
         return "needs_review"
-
     if not is_valid_nd_coordinate(data["latitude"], data["longitude"]):
         return "needs_review"
-
-    if not data.get("well_name") or len(str(data["well_name"]).strip()) < 3:
+    if not data.get("well_name") or len(str(data.get("well_name")).strip()) < 3:
         return "needs_review"
-
     return "valid"
 
-
-# ============================================================
-# INSERT WELL (UPSERT SAFE)
-# ============================================================
-
 def save_well(data):
-
     try:
         if data.get("address") and len(data["address"]) > 500:
             data["address"] = data["address"][:500]
@@ -175,33 +154,18 @@ def save_well(data):
             data.get("qc_status"),
             data.get("raw_text")
         ))
-
         conn.commit()
-
         cursor.execute("SELECT id FROM wells WHERE api = %s", (data.get("api"),))
         row = cursor.fetchone()
         return row[0] if row else None
-
     except Exception as e:
         print(f"DB error while saving well: {e}")
         conn.rollback()
         return None
 
-
-# ============================================================
-# SAVE STIMULATIONS
-# ============================================================
-
 def save_stimulations(well_id, stim_rows, ext):
-
-    if not stim_rows and not any([
-        ext.get('treatment_type'),
-        ext.get('lbs_proppant'),
-        ext.get('treatment_pressure'),
-        ext.get('max_treatment_rate')
-    ]):
+    if not stim_rows and not any([ext.get('treatment_type'), ext.get('lbs_proppant'), ext.get('treatment_pressure'), ext.get('max_treatment_rate')]):
         return
-
     try:
         for stim in stim_rows or [{}]:
             cursor.execute("""
@@ -237,24 +201,14 @@ def save_stimulations(well_id, stim_rows, ext):
                 ext.get("max_treatment_rate"),
                 stim.get("additional_info") or ext.get("details_text")
             ))
-
         conn.commit()
-
     except Exception as e:
         print(f"DB error while saving stimulations: {e}")
         conn.rollback()
 
-
-# ============================================================
-# MAIN PROCESSING
-# ============================================================
-
 def process_file(filepath):
-
     print(f"\nProcessing {filepath}")
-
     file_hash = get_file_hash(filepath)
-
     if already_processed(file_hash):
         print("Skipping (already processed)")
         return
@@ -286,32 +240,29 @@ def process_file(filepath):
     qc_status = validate_well_record(well_data)
     well_data["qc_status"] = qc_status
 
-    print(f"→ QC Status: {qc_status}")
-    print(f"→ API: {api}")
-    print(f"→ Coordinates: {latitude}, {longitude}")
+    print(f"QC status: {qc_status}")
+    print(f"API: {api}")
+    print(f"Coordinates: {latitude}, {longitude}")
 
     if qc_status == "invalid":
-        print("→ Record rejected (invalid)")
+        print("Record rejected (invalid)")
         return
 
     well_id = save_well(well_data)
 
     if well_id:
         save_stimulations(well_id, stim_rows, ext)
-        print("→ Stimulation data processed")
+        if stim_rows:
+            print(f"Inserted {len(stim_rows)} stim rows")
+        else:
+            print("No structured stim rows; saved extended stim summary")
 
-    print("→ Done")
-
-
-# ============================================================
-# RUN
-# ============================================================
+    print("Done")
 
 def main():
-    for file in os.listdir(PDF_FOLDER):
+    for file in os.listdir(pdf_folder):
         if file.lower().endswith(".pdf"):
-            process_file(os.path.join(PDF_FOLDER, file))
-
+            process_file(os.path.join(pdf_folder, file))
 
 if __name__ == "__main__":
     main()

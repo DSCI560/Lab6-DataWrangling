@@ -1,4 +1,4 @@
-#!/mnt/c/Users/limba/OneDrive/Documents/DSCI 560/Lab 6/lab6venv/bin/python3
+#!/home/harsh/Lab6/Lab6-DataWrangling/lab6venv/bin/python3
 """A command line tool for extracting text and images from PDF and
 output it to plain text, html, xml or tags.
 """

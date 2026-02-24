@@ -1,127 +1,183 @@
-# Assignment – Part 1  
-## Data Collection, Wrangling, and Storage
+# Oil Wells Data Wrangling – Lab 6
 
-This assignment required converting scanned oil well PDF documents into structured, enriched, and validated database records. The approach was designed to systematically handle unstructured OCR text, prevent duplicate processing, and store clean relational data for further analysis.
+Team Name: GamerSups  
+Members: Bhargav Limbasia, Harsh Marar, Nisharksh Mittal  
+Assignment: Lab 6 – Oil Wells Data Wrangling  
 
-The overall workflow follows a linear but modular pipeline:
+This project extracts well data from scanned PDFs, stores it in a MySQL database, enriches it using web scraping, and visualizes everything on an interactive map.
 
-1. Initialize the database.
-2. OCR and extract text from PDFs.
-3. Parse structured fields from noisy text.
-4. Enrich records using drillingedge.com.
-5. Clean and normalize extracted data.
-6. Store validated results in relational tables.
+Overview
 
-The system was designed to handle inconsistencies in scanned documents while maintaining database integrity and incremental processing.
+The workflow has four main parts:
 
----
+1. PDF Extraction (OCR + parsing)
+2. Database storage
+3. Web scraping (DrillingEdge)
+4. Web visualization (Flask + Leaflet map)
 
-### create_tables.sql – Database Initialization Logic
+Each PDF corresponds to one well-specific dataset.
 
-This script creates the relational schema for storing all extracted and enriched data. The design separates well metadata, stimulation data, and web-enriched data into independent tables. Primary and foreign keys ensure referential integrity.
+1. PDF Extraction
 
-A UNIQUE constraint is applied to the file hash field to prevent duplicate processing. Each PDF is uniquely identified by its SHA256 hash. This ensures that even if a file is renamed, it will not be reprocessed.
+Script: ocr_and_extract.py
 
-The logic implemented:
-- Normalize the schema to avoid redundancy.
-- Enforce uniqueness at the database level.
-- Use foreign keys to preserve relationships.
-- Allow NULL values for missing or unavailable fields.
+What it does:
+- Iterates through all PDFs in the pdfs/ folder.
+- Uses PyPDF2 first (fast path).
+- Falls back to full OCR using PyTesseract for scanned pages.
+- OCRs all pages (no early stopping).
+- Extracts:
+  - API number
+  - Well name
+  - Latitude & longitude (DMS + decimal support)
+  - Operator
+  - County, state
+  - Address
+  - Stimulation data:
+    - Date stimulated
+    - Formation
+    - Top / bottom depth
+    - Stages
+    - Volume & units
+    - Treatment type
+    - Lbs proppant
+    - Acid %
+    - Maximum treatment pressure
+    - Maximum treatment rate
 
----
+All extracted data is cleaned and inserted into MySQL.
 
-### ocr_and_extract.py – OCR and Base Extraction Logic
+UPSERT logic is used to avoid duplicate API crashes.
 
-This script processes each PDF document and extracts raw text.
+2. Database
 
-Since scanned PDFs contain images rather than selectable text, OCR is required. The primary method uses `ocrmypdf` to generate a searchable text layer. If this fails, a fallback using `pytesseract` is applied.
+Database: oil_wells
 
-Before processing a file, a SHA256 hash is generated and checked against the database. If the hash already exists, the file is skipped. This prevents redundant processing and ensures incremental execution.
+Tables:
 
-After OCR:
-- API number, well name, and coordinates are extracted.
-- Stimulation sections are located heuristically.
-- Raw stimulation lines are stored for structured refinement later.
+wells
+Stores:
+- filename
+- file_hash
+- API
+- well name
+- coordinates
+- operator
+- county/state
+- qc_status
+- raw_text
 
-The logic implemented:
-- Always convert images to machine-readable text first.
-- Apply extraction only after OCR validation.
-- Prevent duplicate processing using hash comparison.
-- Store minimally structured data first, refine later.
+stimulations
+Stores:
+- well_id (foreign key)
+- date_stimulated
+- stimulated_formation
+- top_ft
+- bottom_ft
+- stages
+- volume
+- volume_units
+- treatment_type
+- lbs_proppant
+- acid_percent
+- treatment_pressure
+- max_treatment_rate
+- additional_info
 
----
+3. Web Scraping
 
-### parse_utils.py – Parsing and Field Extraction Logic
+Integrated inside ingestion pipeline.
 
-This module handles structured data extraction from noisy OCR text.
+For each well:
+- Uses API and well name
+- Queries drillingedge.com
+- Extracts:
+  - Well status
+  - Well type
+  - Closest city
+  - Oil production
+  - Gas production
 
-Because OCR output may contain inconsistent formatting, layered extraction logic is used:
-- First attempt labeled pattern matching (e.g., “API:”).
-- If labels are missing, fallback to numeric pattern detection.
-- Support both decimal and DMS coordinate formats.
-- Convert DMS coordinates into decimal degrees.
+Data is appended to existing DB records.
 
-For stimulation data, instead of assuming strict table formatting, the script identifies stimulation-related sections and captures relevant lines. This avoids failure when tables are misaligned during OCR.
+Missing values are replaced with 0 or N/A as required.
 
-The logic implemented:
-- Use regex patterns with fallback strategies.
-- Convert all geographic data to a standardized numeric format.
-- Avoid strict table dependency due to OCR noise.
-- Capture raw stimulation data when the structure is uncertain.
+4. Flask API
 
----
+File: app.py
 
-### scrape_drillingedge.py – Web Enrichment Logic
+Provides:
 
-This script enriches each well record using drillingedge.com.
+GET /api/wells
+Returns:
+- Well metadata
+- All stimulation rows
+- Production info
 
-The API number is used as the primary search key. If unavailable, the well name is used as a fallback. The script queries the search page, identifies the relevant well result, and extracts required fields such as well status, well type, closest city, and production values.
+GET /api/wells/<id>
+Returns:
+- Full detailed record including raw_text
 
-Extracted enrichment data is stored in a separate table linked to the base well record.
+Runs using:
+python app.py
 
-The logic implemented:
-- Use the most reliable identifier (API) first.
-- Apply fallback query logic when necessary.
-- Validate extracted values before insertion.
-- Maintain separation between extracted and scraped data.
-- Add request delay to avoid excessive server load.
+Server runs at:
+http://localhost:5000
 
----
+5. Map Visualization
 
-### preprocess_and_store.py – Cleaning and Normalization Logic
+Frontend: index.html  
+Uses:
+- Leaflet
+- OpenStreetMap tiles
 
-This script cleans and standardizes extracted data before final storage validation.
+What it does:
+- Fetches /api/wells
+- Plots push pins using latitude/longitude
+- Popup shows:
+  - API
+  - Operator
+  - County/state
+  - QC status
+  - Stimulation table
+  - Lbs proppant
 
-OCR often introduces formatting artifacts such as extra whitespace or invalid characters. The script removes non-ASCII characters and normalizes whitespace.
+Map loads automatically when Flask server is running.
 
-Coordinates are validated to ensure they fall within valid geographic ranges. If invalid, they are reset to NULL to prevent corrupt spatial data.
+6. Sample Data Loader (Optional)
 
-The logic implemented:
-- Clean text before committing updates.
-- Normalize numeric fields to correct types.
-- Validate coordinate ranges.
-- Update incomplete records incrementally.
+Script: load_data.py
 
----
+Purpose:
+- Inserts a sample well if database is empty.
+- Useful for testing the map without running OCR.
 
-### Overall Approach and Problem Handling
+How to Run
 
-The system was designed to address the core challenges of the assignment:
+Step 1 – Setup MySQL
+Create database:
+CREATE DATABASE oil_wells;
 
-- Scanned PDFs containing image-based text.
-- Noisy and inconsistent OCR output.
-- Irregular formatting of stimulation tables.
-- Risk of duplicate processing.
-- External enrichment requirement.
-- Need for structured relational storage.
+Run required ALTER statements for stimulation fields if needed.
 
-The solution strategy was:
+Step 2 – Install Dependencies
+pip install pytesseract pdf2image PyPDF2 pymysql flask flask-cors
 
-- Convert unstructured image data into text using OCR.
-- Apply layered parsing logic with fallback mechanisms.
-- Normalize extracted values before storage.
-- Enforce database-level duplicate protection.
-- Separate core extraction from enrichment.
-- Maintain modular scripts for controlled execution.
+Make sure Tesseract and Poppler are installed (Linux environment).
 
-The implemented pipeline converts unstructured scanned documents into validated, enriched, and relationally consistent database records using incremental and defensive processing logic.
+Step 3 – Run PDF Extraction
+python ocr_and_extract.py
+
+Step 4 – Run Web App
+python app.py
+
+Open in browser:
+http://localhost:5000
+
+
+Notes
+
+- Each PDF is treated as one well dataset.
+- OCR processes all pages.
+- Multi-well administrative references inside PDFs are not split into separate records (aligned with assignment intent).
+- Data is cleaned before DB storage.

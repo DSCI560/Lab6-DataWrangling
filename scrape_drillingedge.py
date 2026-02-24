@@ -1,91 +1,89 @@
-# scrape_drillingedge.py
-import requests
-from bs4 import BeautifulSoup
 import mysql.connector
-import time
-import os
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.firefox.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.firefox import GeckoDriverManager
 
-DB_HOST = os.environ.get("DB_HOST", "127.0.0.1")
-DB_USER = os.environ.get("DB_USER", "root")
-DB_PASS = os.environ.get("DB_PASS", "admin123")
-DB_NAME = os.environ.get("DB_NAME", "oil_wells")
+db_config = {
+    "host": "localhost",
+    "user": "root",
+    "password": "admin123",
+    "database": "oil_wells"
+}
 
-BASE_SEARCH = "https://www.drillingedge.com/search?q={query}"
+search_url = "https://www.drillingedge.com/search"
 
-def db_connect():
-    return mysql.connector.connect(host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME)
+def get_all_apis():
+    conn = mysql.connector.connect(**db_config)
+    cursor = conn.cursor()
+    cursor.execute("SELECT api FROM wells WHERE api IS NOT NULL")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [r[0] for r in rows if r[0]]
 
-def search_and_scrape(api, well_name):
-    query = api or well_name
-    if not query:
-        return None
-    url = BASE_SEARCH.format(query=requests.utils.quote(query))
-    r = requests.get(url, timeout=15)
-    if r.status_code != 200:
-        return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    # heuristics: find first result link
-    link = soup.select_one("a.result-link") or soup.select_one("a")
-    if not link:
-        return None
-    href = link.get("href")
-    if href.startswith("/"):
-        href = "https://www.drillingedge.com" + href
-    # fetch well page
-    wp = requests.get(href, timeout=15)
-    if wp.status_code != 200:
-        return None
-    wsoup = BeautifulSoup(wp.text, "html.parser")
-    # Now extract fields: look for labels or highlighted spans
-    def get_text_by_label(lbl):
-        el = wsoup.find(text=lambda t: t and lbl in t)
-        if el:
-            parent = el.parent
-            nxt = parent.find_next_sibling(text=True)
-            if nxt:
-                return nxt.strip()
-        return None
-    # fallback: look for numeric badges
-    barrels = None
-    b_el = wsoup.find(lambda tag: tag.name=="span" and "Barrels" in tag.text)
-    if b_el:
-        barrels = b_el.text.strip()
-    # try well status / type / closest city using label text on page
-    status = None
-    wtype = None
-    city = None
-    # generic approach: scan small tables
-    for tr in wsoup.select("table tr"):
-        tds = [td.get_text(separator=" ", strip=True) for td in tr.find_all(["td","th"])]
-        if len(tds) >= 2:
-            key = tds[0].lower()
-            val = tds[1]
-            if "status" in key and not status:
-                status = val
-            if "type" in key and not wtype:
-                wtype = val
-            if "closest city" in key or "closest" in key:
-                city = val
-    return {"url": href, "status": status, "type": wtype, "city": city, "barrels": barrels}
+def create_driver():
+    options = webdriver.FirefoxOptions()
+    options.set_preference(
+        "general.useragent.override",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:117.0) Gecko/20100101 Firefox/117.0"
+    )
+    service = Service(GeckoDriverManager().install())
+    driver = webdriver.Firefox(service=service, options=options)
+    return driver
+
+def search_api(driver, api_number):
+    wait = WebDriverWait(driver, 30)
+
+    driver.get(search_url)
+
+    api_input = wait.until(
+        EC.presence_of_element_located((By.NAME, "api_no"))
+    )
+
+    api_input.clear()
+    api_input.send_keys(api_number)
+
+    submit_btn = driver.find_element(
+        By.XPATH, "//input[@type='submit' and @value='Search Database']"
+    )
+    submit_btn.click()
+
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//table[contains(@class,'interest_table')]//tr[td]")
+        )
+    )
+
+    rows = driver.find_elements(
+        By.XPATH, "//table[contains(@class,'interest_table')]//tr"
+    )
+
+    headers = [h.text.strip() for h in rows[0].find_elements(By.TAG_NAME, "th")]
+    print(" | ".join(headers))
+
+    for r in rows[1:]:
+        cols = [c.text.strip() for c in r.find_elements(By.TAG_NAME, "td")]
+        if cols:
+            print(" | ".join(cols))
+
+    print("-" * 80)
 
 def main():
-    conn = db_connect()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT id, api, well_name FROM wells")
-    rows = cur.fetchall()
-    for r in rows:
-        res = search_and_scrape(r['api'], r['well_name'])
-        if res:
-            cur2 = conn.cursor()
-            cur2.execute("""
-                INSERT INTO drillingedge_extra (well_id, well_status, well_type, closest_city, barrels_of_oil, scraped_url)
-                VALUES (%s,%s,%s,%s,%s,%s)
-            """, (r['id'], res.get('status'), res.get('type'), res.get('city'), res.get('barrels'), res.get('url')))
-            conn.commit()
-            cur2.close()
-        time.sleep(1)  # avoid hammering the site
-    cur.close()
-    conn.close()
+    apis = get_all_apis()
+    print(f"Found {len(apis)} APIs in database\n")
+
+    driver = create_driver()
+
+
+    try:
+        for api in apis:
+            print(f"Searching API: {api}")
+            search_api(driver, api)
+    finally:
+        driver.quit()
 
 if __name__ == "__main__":
     main()
