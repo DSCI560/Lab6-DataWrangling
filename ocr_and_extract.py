@@ -1,4 +1,3 @@
-# ocr_and_extract.py
 import os
 import hashlib
 import pymysql
@@ -19,20 +18,17 @@ from parse_utils import (
     is_valid_nd_coordinate
 )
 
-# CONFIG
-PDF_FOLDER = "pdfs"
-DB_CONFIG = {
+pdf_folder = "pdfs"
+db_config = {
     "host": "localhost",
     "user": "root",
     "password": "admin123",
     "database": "oil_wells",
 }
 
-# DB connection
-conn = pymysql.connect(**DB_CONFIG)
+conn = pymysql.connect(**db_config)
 cursor = conn.cursor()
 
-# File hash functions
 def get_file_hash(filepath):
     hasher = hashlib.sha256()
     with open(filepath, "rb") as f:
@@ -44,11 +40,9 @@ def already_processed(file_hash):
     cursor.execute("SELECT id FROM wells WHERE file_hash = %s", (file_hash,))
     return cursor.fetchone() is not None
 
-# Balanced OCR: PyPDF2 first, then batched OCR with early stop
 def ocr_pdf_to_text(filepath):
     text = ""
 
-    # STEP 1: try direct extraction
     try:
         reader = PdfReader(filepath)
         for page in reader.pages:
@@ -56,23 +50,20 @@ def ocr_pdf_to_text(filepath):
             if extracted:
                 text += extracted + "\n"
         if len(text.strip()) > 400 and extract_api(text):
-            print("→ Using direct PDF text extraction")
+            print("Using direct PDF text extraction")
             return clean_text(text)
-        # If text but no API, fall back to OCR
         if text.strip():
-            print("→ Text extracted but API not found — triggering OCR fallback")
+            print("Text extracted but API not found, running OCR fallback")
     except Exception:
-        # fail silently to OCR fallback
         pass
 
-    # STEP 2: batched OCR with early stop
     try:
         reader = PdfReader(filepath)
         total_pages = len(reader.pages)
     except Exception:
         total_pages = None
 
-    batch_size =50
+    batch_size = 12
     current_page = 1
 
     while total_pages and current_page <= total_pages:
@@ -94,27 +85,25 @@ def ocr_pdf_to_text(filepath):
             del images
             gc.collect()
 
-            # early stop check: ensure API, coords, and stim section or stim rows present
             stim_rows, ext = parse_all_stim_and_extended(text)
             api_found = extract_api(text)
             coords = extract_coordinates(text)
             coords_ok = coords[0] is not None and coords[1] is not None
 
             stim_present = False
-            # consider stimulation present if we found rows or extended fields
             if stim_rows:
                 stim_present = True
             if ext.get('treatment_type') or ext.get('lbs_proppant') or ext.get('treatment_pressure'):
                 stim_present = True
 
             if api_found and coords_ok and stim_present:
-                print("→ Required metadata + stimulation found — stopping OCR early")
+                print("Required metadata and stimulation found, stopping OCR early")
                 break
 
             current_page = last_page + 1
 
         except MemoryError:
-            print("⚠ MemoryError — reducing batch size")
+            print("MemoryError, reducing batch size")
             batch_size = max(4, batch_size // 2)
             gc.collect()
         except Exception as e:
@@ -124,7 +113,6 @@ def ocr_pdf_to_text(filepath):
 
     return clean_text(text)
 
-# Validation
 def validate_well_record(data):
     if not data.get("api"):
         return "invalid"
@@ -136,7 +124,6 @@ def validate_well_record(data):
         return "needs_review"
     return "valid"
 
-# Save well (UPSERT)
 def save_well(data):
     try:
         if data.get("address") and len(data["address"]) > 500:
@@ -176,7 +163,6 @@ def save_well(data):
         conn.rollback()
         return None
 
-# Save stim rows plus extended fields
 def save_stimulations(well_id, stim_rows, ext):
     if not stim_rows and not any([ext.get('treatment_type'), ext.get('lbs_proppant'), ext.get('treatment_pressure'), ext.get('max_treatment_rate')]):
         return
@@ -220,7 +206,6 @@ def save_stimulations(well_id, stim_rows, ext):
         print(f"DB error while saving stimulations: {e}")
         conn.rollback()
 
-# Main processing
 def process_file(filepath):
     print(f"\nProcessing {filepath}")
     file_hash = get_file_hash(filepath)
@@ -255,12 +240,12 @@ def process_file(filepath):
     qc_status = validate_well_record(well_data)
     well_data["qc_status"] = qc_status
 
-    print(f"→ QC Status: {qc_status}")
-    print(f"→ API: {api}")
-    print(f"→ Coordinates: {latitude}, {longitude}")
+    print(f"QC status: {qc_status}")
+    print(f"API: {api}")
+    print(f"Coordinates: {latitude}, {longitude}")
 
     if qc_status == "invalid":
-        print("→ Record rejected (invalid)")
+        print("Record rejected (invalid)")
         return
 
     well_id = save_well(well_data)
@@ -268,16 +253,16 @@ def process_file(filepath):
     if well_id:
         save_stimulations(well_id, stim_rows, ext)
         if stim_rows:
-            print(f"→ Inserted {len(stim_rows)} stim rows")
+            print(f"Inserted {len(stim_rows)} stim rows")
         else:
-            print("→ No structured stim rows; saved extended stim summary")
+            print("No structured stim rows; saved extended stim summary")
 
-    print("→ Done")
+    print("Done")
 
 def main():
-    for file in os.listdir(PDF_FOLDER):
+    for file in os.listdir(pdf_folder):
         if file.lower().endswith(".pdf"):
-            process_file(os.path.join(PDF_FOLDER, file))
+            process_file(os.path.join(pdf_folder, file))
 
 if __name__ == "__main__":
     main()

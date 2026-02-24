@@ -1,187 +1,89 @@
-import pymysql
-import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
+import mysql.connector
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.firefox.service import Service
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.firefox import GeckoDriverManager
 
-# ===============================
-# CONFIG
-# ===============================
-
-BASE_URL = "https://www.drillingedge.com"
-SEARCH_URL = "https://www.drillingedge.com/search?q="
-
-DB_CONFIG = {
+db_config = {
     "host": "localhost",
     "user": "root",
     "password": "admin123",
-    "database": "oil_wells",
+    "database": "oil_wells"
 }
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+search_url = "https://www.drillingedge.com/search"
 
-# ===============================
-# DB CONNECTION
-# ===============================
+def get_all_apis():
+    conn = mysql.connector.connect(**db_config)
+    cursor = conn.cursor()
+    cursor.execute("SELECT api FROM wells WHERE api IS NOT NULL")
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return [r[0] for r in rows if r[0]]
 
-conn = pymysql.connect(**DB_CONFIG)
-cursor = conn.cursor()
+def create_driver():
+    options = webdriver.FirefoxOptions()
+    options.set_preference(
+        "general.useragent.override",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:117.0) Gecko/20100101 Firefox/117.0"
+    )
+    service = Service(GeckoDriverManager().install())
+    driver = webdriver.Firefox(service=service, options=options)
+    return driver
 
-# ===============================
-# GET WELLS TO ENRICH
-# ===============================
+def search_api(driver, api_number):
+    wait = WebDriverWait(driver, 30)
 
-def get_wells_to_scrape():
-    """
-    Only scrape:
-    - QC valid wells
-    - Wells with API
-    - Wells not already enriched
-    """
-    cursor.execute("""
-        SELECT w.id, w.api
-        FROM wells w
-        LEFT JOIN drillingedge_extra d
-            ON w.id = d.well_id
-        WHERE w.qc_status = 'valid'
-        AND w.api IS NOT NULL
-        AND d.id IS NULL
-    """)
-    return cursor.fetchall()
+    driver.get(search_url)
 
-# ===============================
-# SCRAPE WELL PAGE
-# ===============================
+    api_input = wait.until(
+        EC.presence_of_element_located((By.NAME, "api_no"))
+    )
 
-def scrape_well_data(api):
-    search_url = SEARCH_URL + api
-    print(f"Searching: {search_url}")
+    api_input.clear()
+    api_input.send_keys(api_number)
 
-    try:
-        r = requests.get(search_url, headers=HEADERS, timeout=15)
-    except Exception as e:
-        print(f"Search request failed: {e}")
-        return None
+    submit_btn = driver.find_element(
+        By.XPATH, "//input[@type='submit' and @value='Search Database']"
+    )
+    submit_btn.click()
 
-    if r.status_code != 200:
-        print("Search request returned non-200 status")
-        return None
+    wait.until(
+        EC.presence_of_element_located(
+            (By.XPATH, "//table[contains(@class,'interest_table')]//tr[td]")
+        )
+    )
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    rows = driver.find_elements(
+        By.XPATH, "//table[contains(@class,'interest_table')]//tr"
+    )
 
-    # Find first well link
-    well_link = None
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "/well/" in href:
-            well_link = urljoin(BASE_URL, href)
-            break
+    headers = [h.text.strip() for h in rows[0].find_elements(By.TAG_NAME, "th")]
+    print(" | ".join(headers))
 
-    if not well_link:
-        print("No well link found in search results")
-        return None
+    for r in rows[1:]:
+        cols = [c.text.strip() for c in r.find_elements(By.TAG_NAME, "td")]
+        if cols:
+            print(" | ".join(cols))
 
-    if well_link.rstrip("/") == BASE_URL:
-        print("Homepage link detected — skipping")
-        return None
-
-    print(f"Found well page: {well_link}")
-
-    try:
-        r2 = requests.get(well_link, headers=HEADERS, timeout=15)
-    except Exception as e:
-        print(f"Well page request failed: {e}")
-        return None
-
-    if r2.status_code != 200:
-        print("Failed to load well page")
-        return None
-
-    soup2 = BeautifulSoup(r2.text, "html.parser")
-    text = soup2.get_text(separator="\n")
-
-    def extract_field(label):
-        for line in text.split("\n"):
-            if label.lower() in line.lower():
-                parts = line.split(":")
-                if len(parts) > 1:
-                    return parts[-1].strip()
-        return None
-
-    well_status = extract_field("Well Status")
-    well_type = extract_field("Well Type")
-    closest_city = extract_field("Closest City")
-    barrels = extract_field("Barrels of Oil")
-    gas = extract_field("MCF Gas")
-
-    # Basic sanity check
-    if not any([well_status, well_type, closest_city, barrels, gas]):
-        print("No meaningful data extracted")
-        return None
-
-    return {
-        "well_status": well_status,
-        "well_type": well_type,
-        "closest_city": closest_city,
-        "barrels_of_oil": barrels,
-        "mcf_gas": gas,
-        "scraped_url": well_link
-    }
-
-# ===============================
-# SAVE ENRICHMENT (UPSERT)
-# ===============================
-
-def save_enrichment(well_id, data):
-    cursor.execute("""
-        INSERT INTO drillingedge_extra (
-            well_id,
-            well_status,
-            well_type,
-            closest_city,
-            barrels_of_oil,
-            mcf_gas,
-            scraped_url
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
-        ON DUPLICATE KEY UPDATE
-            well_status = VALUES(well_status),
-            well_type = VALUES(well_type),
-            closest_city = VALUES(closest_city),
-            barrels_of_oil = VALUES(barrels_of_oil),
-            mcf_gas = VALUES(mcf_gas),
-            scraped_url = VALUES(scraped_url)
-    """, (
-        well_id,
-        data["well_status"],
-        data["well_type"],
-        data["closest_city"],
-        data["barrels_of_oil"],
-        data["mcf_gas"],
-        data["scraped_url"]
-    ))
-
-    conn.commit()
-
-# ===============================
-# MAIN
-# ===============================
+    print("-" * 80)
 
 def main():
-    wells = get_wells_to_scrape()
+    apis = get_all_apis()
+    print(f"Found {len(apis)} APIs in database\n")
 
-    print(f"Found {len(wells)} wells to enrich")
+    driver = create_driver()
 
-    for well_id, api in wells:
-        print(f"\nEnriching Well ID {well_id} (API {api})")
 
-        data = scrape_well_data(api)
-
-        if data:
-            save_enrichment(well_id, data)
-            print("→ Enrichment saved")
-        else:
-            print("→ No data saved")
+    try:
+        for api in apis:
+            print(f"Searching API: {api}")
+            search_api(driver, api)
+    finally:
+        driver.quit()
 
 if __name__ == "__main__":
     main()

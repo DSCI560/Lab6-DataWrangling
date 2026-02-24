@@ -3,23 +3,16 @@ import re
 from datetime import datetime
 from typing import Tuple, List, Dict, Optional
 
-# ---------------------------
-# Constants and config
-# ---------------------------
-ND_LAT_RANGE = (45.0, 50.0)
-ND_LON_RANGE = (-105.0, -96.0)
+nd_lat_range = (45.0, 50.0)
+nd_lon_range = (-105.0, -96.0)
 
-HEADER_BLACKLIST = [
+header_blacklist = [
     "24-HOUR PRODUCTION",
     "PLEASE READ INSTRUCTIONS",
     "FOR STATE USE ONLY",
     "DETAILS OF WORK",
     "INDUSTRIAL COMMISSION",
 ]
-
-# ---------------------------
-# Helpers
-# ---------------------------
 
 def clean_text(text: str) -> str:
     if text is None:
@@ -34,7 +27,7 @@ def is_valid_nd_coordinate(lat: Optional[float], lon: Optional[float]) -> bool:
     if lat is None or lon is None:
         return False
     try:
-        return ND_LAT_RANGE[0] <= float(lat) <= ND_LAT_RANGE[1] and ND_LON_RANGE[0] <= float(lon) <= ND_LON_RANGE[1]
+        return nd_lat_range[0] <= float(lat) <= nd_lat_range[1] and nd_lon_range[0] <= float(lon) <= nd_lon_range[1]
     except Exception:
         return False
 
@@ -48,10 +41,6 @@ def dms_to_decimal(deg: float, minutes: float, seconds: float, hemi: str) -> flo
 def _digits_only(s: str) -> str:
     return re.sub(r'\D', '', s or '')
 
-# ---------------------------
-# API extraction
-# ---------------------------
-
 def normalize_api_from_digits(digits: str) -> Optional[str]:
     if not digits or len(digits) != 10:
         return None
@@ -62,7 +51,6 @@ def extract_api(text: str) -> Optional[str]:
         return None
     t = text
 
-    # labeled API:
     m = re.search(r'\bAPI[:\s]*([0-9\-\s]{8,20})\b', t, flags=re.IGNORECASE)
     if m:
         candidate = m.group(1)
@@ -71,23 +59,17 @@ def extract_api(text: str) -> Optional[str]:
         if api:
             return api
 
-    # flexible pattern with dashes or spaces
     m = re.search(r'\b33[-\s]?\d{3}[-\s]?\d{5}\b', t)
     if m:
         candidate = m.group(0)
         digits = _digits_only(candidate)
         return normalize_api_from_digits(digits)
 
-    # fallback: 10-digit starting with 33
     m = re.search(r'\b33\d{8}\b', t)
     if m:
         return normalize_api_from_digits(m.group(0))
 
     return None
-
-# ---------------------------
-# Well name extraction
-# ---------------------------
 
 def extract_well_name(text: str) -> Optional[str]:
     if not text:
@@ -98,7 +80,7 @@ def extract_well_name(text: str) -> Optional[str]:
     if m:
         candidate = m.group(1).strip()
         if len(candidate) > 3 and any(ch.isalpha() for ch in candidate):
-            if not any(h in candidate.upper() for h in HEADER_BLACKLIST):
+            if not any(h in candidate.upper() for h in header_blacklist):
                 return candidate
 
     m = re.search(r'Well Name(?: and Number|/Number| Number)?\s*\n\s*([^\n\r]{3,120})', t, flags=re.IGNORECASE)
@@ -107,16 +89,11 @@ def extract_well_name(text: str) -> Optional[str]:
         if len(candidate) > 3:
             return candidate
 
-    # fallback heuristic
     for line in t.splitlines():
         if re.search(r'[A-Za-z].*\d', line) and len(line) < 120 and ':' not in line:
-            if not any(h in line.upper() for h in HEADER_BLACKLIST):
+            if not any(h in line.upper() for h in header_blacklist):
                 return line.strip()
     return None
-
-# ---------------------------
-# Operator, county/state, address
-# ---------------------------
 
 def extract_operator(text: str) -> Optional[str]:
     if not text:
@@ -176,10 +153,6 @@ def extract_address(text: str) -> Optional[str]:
         candidate = re.sub(r'\s+', ' ', m.group(1).strip())
         return candidate[:500]
     return None
-
-# ---------------------------
-# Coordinates (DMS & decimal tolerant)
-# ---------------------------
 
 def _parse_dms_flexible(s: str) -> Optional[Tuple[float,float]]:
     if not s:
@@ -259,10 +232,6 @@ def extract_coordinates(text: str) -> Tuple[Optional[float], Optional[float]]:
         if parsed:
             return parsed
     return None, None
-
-# ---------------------------
-# Stimulation parsing (table + engineering fields)
-# ---------------------------
 
 def _find_stim_section(text: str) -> Optional[str]:
     if not text:

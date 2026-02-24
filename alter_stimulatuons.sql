@@ -1,4 +1,3 @@
--- Active: 1771910848211@@127.0.0.1@3306@oil_wells
 ALTER TABLE stimulations
 ADD INDEX (well_id);
 
